@@ -1,0 +1,32 @@
+#!/bin/sh
+# Starts Cataclysm: Bright Nights in the terminal, with its read-only data
+# beside this script (an av install: the game, data/, lang/ and lib/ in one
+# folder) or under /usr (the system packages: everything in
+# /usr/lib/cataclysm-bn). The player's saves, options, keymaps, memorials
+# and logs go to $XDG_STATE_HOME/cataclysm-bn (by default
+# ~/.local/state/cataclysm-bn), through the game's own --userdir option.
+# Arguments are passed on to the game (--help lists them).
+
+# follow symlinks to this script (av links it into ~/.local/bin)
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+here=$(cd "$(dirname "$self")" && pwd -P)
+[ -x "$here/cataclysm-bn-curses" ] || here=/usr/lib/cataclysm-bn
+
+state=${XDG_STATE_HOME:-$HOME/.local/state}/cataclysm-bn
+mkdir -p "$state" || exit 1
+
+# macOS: the curses libraries ship beside the game (upstream's own app
+# starts it the same way); Linux finds them through the binary's RUNPATH
+case $(uname -s) in
+  Darwin) DYLD_LIBRARY_PATH="$here:$here/lib"; export DYLD_LIBRARY_PATH ;;
+esac
+
+cd "$here" || exit 1
+exec "$here/cataclysm-bn-curses" --basepath "$here/" --userdir "$state/" "$@"

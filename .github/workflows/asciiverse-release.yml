@@ -1,0 +1,142 @@
+# Packages Cataclysm: Bright Nights for the Asciiverse catalog from
+# upstream's official curses (terminal) builds of the release in UPSTREAM
+# below: one archive per target, named cataclysm-bn-<target>.tar.gz, plus
+# a SHA256SUMS file, attached to a GitHub release (hub/catalog/SCHEMA.md,
+# release.source = "github").
+#
+# Each archive holds our start script cataclysm-bn (which av runs), the
+# game as cataclysm-bn-curses, data/, lang/, lib/, the licences, README.md
+# and PATCHES.md (asciiverse/stage.sh). Upstream's files are downloaded
+# from its release and checked against the sha256 sums pinned here.
+#
+# Tags look like v0.13.0-av.1: the upstream release, then our packaging
+# release. Linux x86_64 (upstream builds no curses edition for arm64 Linux
+# or Windows) and macOS x86_64 and arm64.
+
+name: asciiverse-release
+
+on:
+  push:
+    tags: ["*-av.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag to build and release"
+        required: true
+
+env:
+  ID: cataclysm-bn
+  TAG: ${{ inputs.tag || github.ref_name }}
+  UPSTREAM: v0.13.0
+  BASE: https://github.com/cataclysmbn/Cataclysm-BN/releases/download/v0.13.0
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      FILE: cbn-linux-curses-x64-v0.13.0.tar.gz
+      SHA256: 73c26b9984f63e349823164abc05433746a05ce42f74645f03fa79d52483e10c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download upstream's build
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/$FILE" "$BASE/$FILE"
+          echo "$SHA256  $RUNNER_TEMP/$FILE" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/up"
+          tar -xzf "$RUNNER_TEMP/$FILE" -C "$RUNNER_TEMP/up"
+
+      - name: Stage
+        run: sh asciiverse/stage.sh "$RUNNER_TEMP/up/cataclysmbn-$UPSTREAM" linux
+
+      - name: Smoke test
+        run: |
+          # the game must start from the script and make the state folder
+          sudo apt-get install -y -qq libsqlite3-0 libncursesw6 >/dev/null
+          here=$PWD
+          (cd /tmp && script -qec "TERM=xterm LANG=C.UTF-8 HOME=/tmp/h timeout -s KILL 20 $here/stage/cataclysm-bn" /dev/null </dev/null || true) >smoke.log
+          ls /tmp/h/.local/state/cataclysm-bn/config/options.json || { tail -c 2000 smoke.log; exit 1; }
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/$ID-$TARGET.tar.gz" -C stage .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            file: cbn-osx-curses-x64-v0.13.0.dmg
+            sha256: e4acfbc78e1bd533767dde3d1950e236da7ea292dd079629d9a2ab25d9579e52
+          - target: aarch64-apple-darwin
+            file: cbn-osx-curses-arm-v0.13.0.dmg
+            sha256: 26a15505bfbfce1c892142521eb017f6c26bd64e66235774f3a8b8422cd592bf
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download upstream's build
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/${{ matrix.file }}" "$BASE/${{ matrix.file }}"
+          echo "${{ matrix.sha256 }}  $RUNNER_TEMP/${{ matrix.file }}" | shasum -a 256 -c
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" "$RUNNER_TEMP/${{ matrix.file }}"
+
+      - name: Stage
+        run: |
+          sh asciiverse/stage.sh "$RUNNER_TEMP/dmg/Cataclysm.app/Contents/Resources" macos
+          hdiutil detach "$RUNNER_TEMP/dmg"
+          file stage/cataclysm-bn-curses
+
+      - name: Smoke test
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          here=$PWD
+          (cd /tmp && script -q /dev/null sh -c "TERM=xterm LANG=en_US.UTF-8 HOME=/tmp/h $here/stage/cataclysm-bn & p=\$!; sleep 20; kill -9 \$p" </dev/null || true) >smoke.log
+          ls /tmp/h/.local/state/cataclysm-bn/config/options.json || { tail -c 2000 smoke.log; exit 1; }
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/$ID-${{ matrix.target }}.tar.gz" -C stage .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: [linux, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "Cataclysm: Bright Nights $TAG" \
+                 --notes "Cataclysm: Bright Nights $UPSTREAM by the Cataclysm: Bright Nights contributors (github.com/cataclysmbn/Cataclysm-BN), upstream's official curses (terminal) builds with a start script that keeps the player's files in the state folder, for the Asciiverse catalog. See PATCHES.md."
+          gh release upload "$TAG" dist/* -R "$GITHUB_REPOSITORY" --clobber
